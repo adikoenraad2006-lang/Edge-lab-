@@ -19,8 +19,9 @@ _ORDER_BLOCK_DETECT = r"""
 // Returns true and fills zoneLow/zoneHigh when a zone confirmed on bar `shift`.
 bool DetectOrderBlock(int shift, double &zoneLow, double &zoneHigh, int &bias)
 {
+   // ATR of the bar just before the move started, as in the Python detector
    double atrBuf[];
-   if(CopyBuffer(gAtrHandle, 0, shift+InpDisplacementBars, 2, atrBuf) <= 0) return false;
+   if(CopyBuffer(gAtrHandle, 0, shift+InpDisplacementBars, 1, atrBuf) <= 0) return false;
    double refAtr = atrBuf[0];
    if(refAtr <= 0) return false;
 
@@ -77,6 +78,10 @@ def export(spec: Spec, summary: dict | None = None) -> str:
     s = spec.scoring
     zp = spec.zone.resolved()
     tf = _mql_timeframe(spec.timeframe)
+    if tf is None:
+        raise ValueError(
+            f"timeframe {spec.timeframe!r} has no MT5 equivalent; use one of "
+            "1min, 5min, 15min, 30min, 1h, 4h, 1D")
 
     stats_block = ""
     if summary:
@@ -198,7 +203,7 @@ def _levels_body(s) -> str:
     elif s.stop.mode == "atr":
         stop = "   stop = entry - bias * InpStopValue * atr;"
     else:
-        stop = "   stop = entry - bias * InpStopValue * _Point;"
+        stop = "   stop = entry - bias * InpStopValue;   // price points, as in the study"
 
     if s.target.mode == "r_multiple":
         tgt = ("   double risk = (entry - stop) * bias;\n"
@@ -208,7 +213,7 @@ def _levels_body(s) -> str:
     elif s.target.mode == "none":
         tgt = "   target = 0.0;   // study used a time exit only"
     else:
-        tgt = "   target = entry + bias * InpTargetValue * _Point;"
+        tgt = "   target = entry + bias * InpTargetValue;   // price points, as in the study"
     return stop + "\n" + tgt
 
 
@@ -223,9 +228,13 @@ def _direction_guard(spec) -> str:
 def _mql_timeframe(tf: str) -> str:
     import pandas as pd
     mins = int(pd.Timedelta(tf).total_seconds() // 60)
-    table = {1: "PERIOD_M1", 5: "PERIOD_M5", 15: "PERIOD_M15", 30: "PERIOD_M30",
-             60: "PERIOD_H1", 240: "PERIOD_H4", 1440: "PERIOD_D1"}
-    return table.get(mins, "PERIOD_M5")
+    table = {1: "PERIOD_M1", 2: "PERIOD_M2", 3: "PERIOD_M3", 4: "PERIOD_M4",
+             5: "PERIOD_M5", 6: "PERIOD_M6", 10: "PERIOD_M10",
+             12: "PERIOD_M12", 15: "PERIOD_M15", 20: "PERIOD_M20",
+             30: "PERIOD_M30", 60: "PERIOD_H1", 120: "PERIOD_H2",
+             180: "PERIOD_H3", 240: "PERIOD_H4", 360: "PERIOD_H6",
+             480: "PERIOD_H8", 720: "PERIOD_H12", 1440: "PERIOD_D1"}
+    return table.get(mins)
 
 
 def _pct(v):

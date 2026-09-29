@@ -191,6 +191,9 @@ def _date_is_ambiguous(samples: list, fmt: str | None) -> bool:
     """
     if not fmt or not any(sep in fmt for sep in ("/", ".", "-")):
         return False
+    if fmt.startswith("%Y"):
+        # year-first (ISO, MT5's 2015.01.05) is always year-month-day
+        return False
     swapped = (fmt.replace("%d", "\x00").replace("%m", "%d")
                   .replace("\x00", "%m"))
     if swapped == fmt:

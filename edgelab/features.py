@@ -93,9 +93,11 @@ def build(df: pd.DataFrame, exchange_tz: str = DEFAULT_EXCHANGE_TZ,
     daily["prior_low"] = daily["d_low"].shift(1)
 
     mapped = out["_date"].map(daily["prior_range"])
+    out["prior_day_range"] = mapped.to_numpy()
     out["prior_day_range_atr"] = mapped.to_numpy() / out["atr"].to_numpy()
     pc = out["_date"].map(daily["prior_close"]).to_numpy()
     d_open = out["_date"].map(daily["d_open"]).to_numpy()
+    out["gap_points"] = d_open - pc
     out["gap_atr"] = (d_open - pc) / out["atr"].to_numpy()
     out["prior_day_high"] = out["_date"].map(daily["prior_high"]).to_numpy()
     out["prior_day_low"] = out["_date"].map(daily["prior_low"]).to_numpy()

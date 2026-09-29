@@ -34,6 +34,22 @@ S.setdefault("baselines", {})
 S.setdefault("oos_unlocked", False)
 
 
+def set_spec(sp: Spec, text: str) -> None:
+    """
+    Make `sp` the current spec. If its rules differ from the spec the current
+    results came from, drop those results: baselines, saving and the holdout
+    would otherwise score the new rules against the old scan.
+    """
+    old = S.get("spec")
+    S["spec"], S["spec_text"] = sp, text
+    if old is None or old.fingerprint() != sp.fingerprint():
+        S["events"] = None
+        S["scan_meta"] = None
+        S["baselines"] = {}
+        S["oos_unlocked"] = False
+        S["oos_events"] = None
+
+
 @st.cache_resource
 def get_library(root: str) -> Library:
     return Library(root)
@@ -202,7 +218,7 @@ with st.sidebar:
             st.error(f"That window sits outside your data "
                      f"({d0} → {d1}).")
         else:
-            held = m1[m1.index > pd.Timestamp(is_end, tz="UTC")]
+            held = m1[m1.index >= pd.Timestamp(is_end, tz="UTC") + pd.Timedelta("1D")]
             if held.empty:
                 st.warning("No data left for the holdout. Move IS end earlier.")
             else:
@@ -246,8 +262,7 @@ with tabs[0]:
                 try:
                     spec, raw = nl.translate(desc, symbol=symbol or "",
                                              api_key=api_key or None)
-                    S["spec"], S["spec_text"] = spec, raw
-                    S["events"] = None
+                    set_spec(spec, raw)
                     st.success("Translated. Check it in the Spec tab before running.")
                 except RuntimeError as e:
                     st.error(str(e))
@@ -282,13 +297,13 @@ with tabs[1]:
             if probs:
                 st.error("  \n".join(f"• {p}" for p in probs))
             else:
-                S["spec"], S["spec_text"] = sp, text
+                set_spec(sp, text)
                 st.success("Spec is runnable.")
         except json.JSONDecodeError as e:
             st.error(f"Not valid JSON: {e}")
 
     if c2.button("Reset to example", use_container_width=True):
-        S["spec"], S["spec_text"] = EXAMPLE_SPEC, EXAMPLE_SPEC.to_json()
+        set_spec(EXAMPLE_SPEC, EXAMPLE_SPEC.to_json())
         st.rerun()
 
     run = c3.button("Run scan", type="primary", use_container_width=True)
@@ -296,7 +311,7 @@ with tabs[1]:
     if run:
         try:
             sp = Spec.from_json(text)
-            S["spec"], S["spec_text"] = sp, text
+            set_spec(sp, text)
         except json.JSONDecodeError as e:
             st.error(f"Not valid JSON: {e}")
             sp = None
@@ -553,7 +568,7 @@ with tabs[7]:
                    "the spec.")
         if st.button("Unlock holdout", type="primary"):
             m1 = S["m1"]
-            oos_m1 = m1[m1.index > pd.Timestamp(is_end, tz="UTC") + pd.Timedelta("1D")]
+            oos_m1 = m1[m1.index >= pd.Timestamp(is_end, tz="UTC") + pd.Timedelta("1D")]
             if oos_m1.empty:
                 st.error("No data after the IS window.")
             else:
@@ -564,16 +579,18 @@ with tabs[7]:
                 S["oos_events"] = res.events
                 S["oos_unlocked"] = True
                 mode = S.get("mode_res", "fixed")
+                tr = S.get("tr_res", 2.0)
                 oos_summ = stats.summarise(res.events,
-                                           wins_for(res.events, mode, 2.0))
+                                           wins_for(res.events, mode, tr))
                 lib.log_reveal(family, spec.fingerprint(), oos_summ)
                 st.rerun()
 
         if S.get("oos_unlocked") and S.get("oos_events") is not None:
             mode = S.get("mode_res", "fixed")
-            is_s = stats.summarise(events, wins_for(events, mode, 2.0))
+            tr = S.get("tr_res", 2.0)
+            is_s = stats.summarise(events, wins_for(events, mode, tr))
             oos = S["oos_events"]
-            oos_s = stats.summarise(oos, wins_for(oos, mode, 2.0)) if len(oos) \
+            oos_s = stats.summarise(oos, wins_for(oos, mode, tr)) if len(oos) \
                 else {"n": 0}
             st.plotly_chart(charts.is_oos(is_s, oos_s), use_container_width=True)
             if oos_s.get("n"):
@@ -617,8 +634,7 @@ with tabs[8]:
         sid = c1.selectbox("Study", ids)
         if c2.button("Load spec", use_container_width=True):
             rec = lib.get_study(int(sid))
-            S["spec_text"] = rec["spec_json"]
-            S["spec"] = Spec.from_json(rec["spec_json"])
+            set_spec(Spec.from_json(rec["spec_json"]), rec["spec_json"])
             st.success(f"Loaded spec from #{sid}. Open the Spec tab.")
         if c3.button("Delete", use_container_width=True):
             lib.delete_study(int(sid))
@@ -629,12 +645,17 @@ with tabs[8]:
             st.markdown("#### MQL5 skeleton")
             st.caption("Scaffolding for MT5 — detector and level arithmetic "
                        "transcribed, execution and risk left as marked TODOs.")
-            code = mql5.export(Spec.from_json(rec["spec_json"]),
-                               json.loads(rec["summary_json"] or "{}"))
-            st.download_button("Download .mq5", code.encode(),
-                               file_name=f"EdgeLab_{rec['fingerprint']}.mq5")
-            with st.expander("Preview"):
-                st.code(code, language="cpp")
+            try:
+                code = mql5.export(Spec.from_json(rec["spec_json"]),
+                                   json.loads(rec["summary_json"] or "{}"))
+            except ValueError as e:
+                code = None
+                st.warning(f"No MQL5 export: {e}")
+            if code:
+                st.download_button("Download .mq5", code.encode(),
+                                   file_name=f"EdgeLab_{rec['fingerprint']}.mq5")
+                with st.expander("Preview"):
+                    st.code(code, language="cpp")
 
             ev = lib.load_events(int(sid))
             if len(ev):

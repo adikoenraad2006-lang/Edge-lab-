@@ -326,6 +326,12 @@ def main():
                        "06/01/2015,01:01,1,2,0.5,1.5\n")
         check("day-first/month-first ambiguity is flagged",
               sniff(amb).ambiguous_date)
+        mt5 = Path(td) / "mt5.csv"
+        mt5.write_text("time,open,high,low,close\n"
+                       "2015.01.05 01:00,1,2,0.5,1.5\n"
+                       "2015.01.06 01:01,1,2,0.5,1.5\n")
+        check("year-first dates are not flagged as ambiguous",
+              not sniff(mt5).ambiguous_date)
 
     print("\n12. Library, reveal ledger and trial registry")
     with tempfile.TemporaryDirectory() as td:
@@ -368,6 +374,55 @@ def main():
     other = mql5.export(base_spec(zone=Zone("fvg", {})))
     check("unsupported detector becomes an explicit stub",
           "TODO" in other and "fvg" in other)
+    pts = mql5.export(base_spec(scoring=Scoring(
+        stop=Stop("fixed_points", 20.0), target=Target("fixed_points", 40.0))))
+    check("fixed_points levels are price points, not ticks",
+          "InpStopValue * _Point" not in pts
+          and "InpTargetValue * _Point" not in pts)
+    try:
+        mql5.export(base_spec(timeframe="7min"))
+        check("unsupported timeframe is refused", False, "exported anyway")
+    except ValueError:
+        check("unsupported timeframe is refused", True)
+
+    print("\n15. Regression checks")
+    # Price-derived context must come from the last CLOSED detection bar.
+    f5 = features.build(resample(m1, "5min"))
+    closes = f5.index + pd.Timedelta("5min")
+    pos = closes.searchsorted(pd.DatetimeIndex(ev["ts"]), "right") - 1
+    check("ATR at entry is from the last closed bar",
+          np.allclose(ev["atr_at_entry"].to_numpy(float),
+                      f5["atr"].to_numpy(float)[pos]))
+
+    # Re-tests must use the configured trigger, not a plain touch.
+    rt = scanner.run(m1, base_spec(
+        trigger=Trigger("close_inside", first_test_only=False))).events
+    cl = m1["close"].reindex(pd.DatetimeIndex(rt["ts"])).to_numpy()
+    inside = (cl >= rt["zone_low"].to_numpy()) & (cl <= rt["zone_high"].to_numpy())
+    check("re-tests honour close_inside", len(rt) > 0 and inside.all(),
+          f"{(~inside).sum()} of {len(rt)} events closed outside the zone")
+
+    # A limit fill cannot claim a target that printed before the fill.
+    #   zone 100-101 long, stop 100, target 103; fill bar high 104 close 100.8
+    o_ = np.array([104.0, 100.8, 100.8]); h_ = np.array([104.0, 100.9, 100.9])
+    l_ = np.array([100.5, 100.7, 100.7]); c_ = np.array([100.8, 100.8, 100.8])
+    sc = scanner.score_event(0, 1, 100.0, 101.0, 1.0, base_spec(scoring=Scoring(
+        stop=Stop("zone_far_edge", 1.0), target=Target("r_multiple", 2.0),
+        max_holding_bars=3)), o_, h_, l_, c_, 3)
+    check("fill bar target print is not a win",
+          sc["outcome"] != scanner.WIN and sc["ambiguous"], str(sc["outcome"]))
+
+    psl = detectors.detect(f5, "prior_session_level",
+                           Zone("prior_session_level").resolved())
+    check("prior_session_level runs", len(psl) > 0, f"{len(psl)} zones")
+
+    typo = base_spec(scoring=Scoring(stop=Stop("r", 1.0)))
+    check("unknown stop mode rejected", len(typo.validate()) > 0)
+    typo2 = base_spec(trigger=Trigger("tuch"))
+    check("unknown trigger rejected", len(typo2.validate()) > 0)
+
+    for expr in ("9 ** 9 ** 9 > 0", "'x' * 1000 == 'x'"):
+        check(f"filter refuses {expr!r}", check_expression(expr) is not None)
 
     print("\n" + "=" * 60)
     if FAILURES:

@@ -93,12 +93,20 @@ def run(m1: pd.DataFrame, spec: Spec,
     c = m1["close"].to_numpy(float)
     n_m1 = len(m1)
 
-    # detection-timeframe context, looked up by timestamp at event time
+    # Detection-timeframe context. Bars are labelled by their OPEN time, so the
+    # bar containing an event is still forming when the event happens. Calendar
+    # fields (hour, session, ...) come from that bar; anything computed from
+    # prices (ATR, EMA distance, day range) comes from the last bar that had
+    # CLOSED by the event, or it would include prices from after the event.
     ctx_idx = f.index.as_unit("ns").asi8
+    tf_delta_ns = pd.Timedelta(spec.timeframe).as_unit("ns").value
+    ctx_close = ctx_idx + tf_delta_ns
     ctx_cols = ["atr", "session", "hour", "minute", "dow", "month", "year",
-                "dist_ema50_atr", "day_range_atr", "prior_day_range_atr",
-                "gap_atr"]
+                "dist_ema50_atr", "day_range_atr", "prior_day_range",
+                "gap_points"]
     ctx = {k: f[k].to_numpy() for k in ctx_cols if k in f}
+    ctx_day = (pd.Index(f["_date"]).map(lambda d: d.toordinal()).to_numpy()
+               if "_date" in f else None)
 
     htf_cols = {}
     htf_delta_ns = (pd.Timedelta(spec.htf.timeframe).as_unit("ns").value
@@ -144,15 +152,16 @@ def run(m1: pd.DataFrame, spec: Spec,
         if spec.trigger.first_test_only:
             hits = hits[:1]
         else:
-            hits = _separate_tests(hits, seg_h, seg_l, zl, zh)
+            hits = _separate_tests(hit, seg_h, seg_l, zl, zh)
 
         for k, rel in enumerate(hits, start=1):
             n_tests_raw += 1
             i = a + int(rel)
-            ci = int(np.searchsorted(ctx_idx, ts[i], "right")) - 1
-            if ci < 0:
+            ci = int(np.searchsorted(ctx_idx, ts[i], "right")) - 1   # forming
+            cc = int(np.searchsorted(ctx_close, ts[i], "right")) - 1  # closed
+            if ci < 0 or cc < 0:
                 continue
-            atr_now = float(ctx["atr"][ci]) if "atr" in ctx else np.nan
+            atr_now = float(ctx["atr"][cc]) if "atr" in ctx else np.nan
             if not np.isfinite(atr_now) or atr_now <= 0:
                 continue
 
@@ -172,10 +181,16 @@ def run(m1: pd.DataFrame, spec: Spec,
                 "displacement_atr": float(z.displacement_atr)
                 if np.isfinite(z.displacement_atr) else 0.0,
                 "bias": float(bias),
-                "dist_ema50_atr": _f(ctx, "dist_ema50_atr", ci),
-                "day_range_atr": _f(ctx, "day_range_atr", ci),
-                "prior_day_range_atr": _f(ctx, "prior_day_range_atr", ci),
-                "gap_atr": _f(ctx, "gap_atr", ci),
+                "dist_ema50_atr": _f(ctx, "dist_ema50_atr", cc),
+                # the last closed bar may belong to yesterday; then no range
+                # has been made today yet
+                "day_range_atr": (_f(ctx, "day_range_atr", cc)
+                                  if ctx_day is None or ctx_day[cc] == ctx_day[ci]
+                                  else 0.0),
+                # these are known from the day's first tick; only the ATR used
+                # to scale them has to come from a closed bar
+                "prior_day_range_atr": _f(ctx, "prior_day_range", ci) / atr_now,
+                "gap_atr": _f(ctx, "gap_points", ci) / atr_now,
             }
             env.update(_htf_env(htf_ns, htf_cols, ts[i], bias, htf_delta_ns))
 
@@ -262,20 +277,21 @@ def _f(ctx, key, i):
     return v if np.isfinite(v) else 0.0
 
 
-def _separate_tests(hits, seg_h, seg_l, zl, zh):
+def _separate_tests(hit, seg_h, seg_l, zl, zh):
     """
-    Collapse consecutive bars inside the zone into one test. A new test only
-    counts once price has fully left the zone and come back.
+    One test per visit to the zone. A visit is a run of bars touching the zone;
+    the test is the first bar in that run that meets the trigger (`hit`). A new
+    test only counts once price has fully left the zone and come back.
     """
     out = []
-    inside = False
+    armed = True
     for r in range(len(seg_h)):
-        touching = (seg_h[r] >= zl) and (seg_l[r] <= zh)
-        if touching and not inside:
+        touching = ((seg_h[r] >= zl) and (seg_l[r] <= zh)) or hit[r]
+        if not touching:
+            armed = True
+        elif armed and hit[r]:
             out.append(r)
-            inside = True
-        elif not touching:
-            inside = False
+            armed = False
     return np.array(out, dtype=int)
 
 
@@ -289,6 +305,7 @@ def score_event(i, bias, zl, zh, atr_now, spec, o, h, l, c, n_m1):
         entry = float(o[i])
     else:
         entry = zh if bias == 1 else zl          # proximal edge, limit fill
+    limit_fill = sc.entry != "next_open"
 
     height = zh - zl
     if sc.stop.mode == "zone_far_edge":
@@ -324,6 +341,22 @@ def score_event(i, bias, zl, zh, atr_now, spec, o, h, l, c, n_m1):
     # opposite of what they are for.
     for j in range(i, end):
         hi, lo = h[j], l[j]
+        fill_bar = limit_fill and j == i
+        if fill_bar:
+            # With a limit fill, the favourable extreme of the fill bar may have
+            # printed BEFORE price came back to the zone. Only the close is
+            # certainly after the fill, so it caps the favourable side. The
+            # adverse side needs no cap: the stop lies beyond the entry, so
+            # reaching it means passing through the entry first.
+            raw_tgt = (np.isfinite(target) and
+                       ((hi >= target) if bias == 1 else (lo <= target)))
+            hi = max(entry, c[j]) if bias == 1 else hi
+            lo = min(entry, c[j]) if bias == -1 else lo
+            capped_tgt = (np.isfinite(target) and
+                          ((hi >= target) if bias == 1 else (lo <= target)))
+            if raw_tgt and not capped_tgt:
+                # the target printed on the fill bar, order unknown: not a win
+                ambiguous = True
         fav = ((hi - entry) if bias == 1 else (entry - lo)) / risk
         adv = ((entry - lo) if bias == 1 else (hi - entry)) / risk
         mfe = max(mfe, fav)

@@ -15,10 +15,24 @@ from __future__ import annotations
 import ast
 import operator as op
 
+def _pow(a, b):
+    # Unbounded exponents (9 ** 9 ** 9) would hang the scan.
+    if isinstance(b, (int, float)) and abs(b) > 64:
+        raise ExpressionError("exponent too large (max 64)")
+    return op.pow(a, b)
+
+
+def _mul(a, b):
+    # 'x' * 10 ** 9 would build a gigabyte string; filters only need numbers.
+    if isinstance(a, (str, list)) or isinstance(b, (str, list)):
+        raise ExpressionError("* is only allowed on numbers")
+    return op.mul(a, b)
+
+
 _BIN = {
-    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
+    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: _mul,
     ast.Div: op.truediv, ast.FloorDiv: op.floordiv, ast.Mod: op.mod,
-    ast.Pow: op.pow,
+    ast.Pow: _pow,
 }
 _CMP = {
     ast.Eq: op.eq, ast.NotEq: op.ne, ast.Lt: op.lt, ast.LtE: op.le,
