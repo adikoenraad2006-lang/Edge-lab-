@@ -181,7 +181,8 @@ def prior_session_level(f: pd.DataFrame, which: str = "high",
     if which not in daily.columns:
         raise ValueError(f"prior_session_level: which={which!r} not supported")
 
-    ends = sub.groupby("_date").apply(lambda d: d.index[-1], include_groups=False)
+    # last bar of each day's session (works on every pandas >= 2.0)
+    ends = pd.Series(sub.index, index=sub.index).groupby(sub["_date"]).max()
     a = f["atr"]
     rows = []
     dates = list(daily.index)
@@ -191,7 +192,9 @@ def prior_session_level(f: pd.DataFrame, which: str = "high",
         pos = a.index.searchsorted(formed)
         if pos >= len(a):
             continue
-        ref = float(a.iloc[pos])
+        # ATR of the session's last bar, which closed at `formed`; the bar at
+        # `pos` is still forming then
+        ref = float(a.iloc[pos - 1])
         if not np.isfinite(ref) or ref <= 0:
             continue
         pad = zone_pad_atr * ref

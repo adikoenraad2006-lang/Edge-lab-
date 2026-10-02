@@ -18,6 +18,18 @@ Opens in your browser. Everything runs locally; price data never leaves your
 machine. The Anthropic API key is optional and is only used to translate English
 into a rule spec — you can write the spec by hand and never call the API.
 
+## Layout
+
+```
+app.py          Streamlit UI (run from this folder)
+selftest.py     engine checks
+diagnose.py     memory diagnostic for large CSV folders
+edgelab/        the engine package: data, detectors, features, filters,
+                scanner, stats, spec, library, nl, mql5, charts
+```
+
+Always run the commands from the repo root so `import edgelab` resolves.
+
 ## First run
 
 1. **Sidebar** — point at your CSV folder, pick a symbol, confirm the timezone

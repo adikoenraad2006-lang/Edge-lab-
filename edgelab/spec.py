@@ -194,6 +194,30 @@ class Spec:
                         f"Detector {self.zone.detector} has no parameter {k!r}. "
                         f"Valid: {sorted(allowed)}"
                     )
+        for label, value, allowed in (
+                ("trigger.type", self.trigger.type,
+                 ("touch", "close_inside", "wick_through")),
+                ("scoring.stop.mode", self.scoring.stop.mode,
+                 ("zone_far_edge", "atr", "fixed_points")),
+                ("scoring.target.mode", self.scoring.target.mode,
+                 ("r_multiple", "atr", "fixed_points", "none")),
+                ("scoring.entry", self.scoring.entry,
+                 ("zone_proximal", "next_open"))):
+            if value not in allowed:
+                problems.append(
+                    f"{label} must be one of {list(allowed)}, got {value!r}")
+        bad_numbers = []
+        for label, value in (("scoring.stop.value", self.scoring.stop.value),
+                             ("scoring.target.value", self.scoring.target.value),
+                             ("scoring.max_holding_bars",
+                              self.scoring.max_holding_bars),
+                             ("trigger.min_bars_after_formation",
+                              self.trigger.min_bars_after_formation)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                bad_numbers.append(f"{label} must be a number, got {value!r}")
+        if bad_numbers:
+            # the range checks below would raise on a non-number
+            return problems + bad_numbers
         if self.direction not in ("long", "short", "both"):
             problems.append(f"direction must be long/short/both, got {self.direction}")
         if self.scoring.max_holding_bars < 1:
